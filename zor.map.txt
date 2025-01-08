@@ -1,0 +1,6 @@
+ZOBJECT{
+    global:
+    zor_free;
+    local:
+    *;
+};
