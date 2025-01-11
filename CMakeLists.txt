@@ -12,8 +12,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(C_WARNINGS "-Wall -Wextra -Wshadow -Wformat=2 -Wunused")
 
 # Set flags for Debug and Release configurations
-set(CMAKE_C_FLAGS_DEBUG     "${CMAKE_C_FLAGS_DEBUG} -ggdb3 -O0 -fno-omit-frame-pointer -fsanitize=address")
-set(CMAKE_C_FLAGS_RELEASE   "${CMAKE_C_FLAGS_RELEASE} -O3")
+set(CMAKE_C_FLAGS_DEBUG     "${CMAKE_C_FLAGS_DEBUG} -ggdb3 -O0 -fno-omit-frame-pointer -fsanitize=address -fsanitize=undefined -static-libsan -mfpu=neon")
+set(CMAKE_C_FLAGS_RELEASE   "${CMAKE_C_FLAGS_RELEASE} -O3 ")
 
 # Set version script
 set(VERSION_SCRIPT ${CMAKE_SOURCE_DIR}/zor.map.txt)
@@ -31,10 +31,12 @@ include(headers.cmake)
 include(ExternalProject)
 
 ExternalProject_Add(
-  Zot 
+  Zot
   SOURCE_DIR /sdcard/Jay/Projects/xab_laud_ubject/zmemory/
   CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/zot
   BUILD_ALWAYS TRUE
+  #INSTALL_COMMAND ${CMAKE_COMMAND} --install .
+  BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/zot/bin/libzot.so
 )
 
 set(PCG_SRC /sdcard/Jay/Projects/xab_laud_ubject/pcg-c)
@@ -42,7 +44,7 @@ set(PCG_SRC /sdcard/Jay/Projects/xab_laud_ubject/pcg-c)
 ExternalProject_Add(
   pcg-c
   SOURCE_DIR ${PCG_SRC}
-  PATCH_COMMAND mkdir -p ${CMAKE_BINARY_DIR}/pcg/lib ${CMAKE_BINARY_DIR}/pcg/include && sed "s|PREFIX = /usr/local|PREFIX = ${CMAKE_BINARY_DIR}/pcg|" Makefile | sed -E "/cd / { /cd src/! s|^|#| }" > ${PCG_SRC}/Makefile.termux.patch
+  PATCH_COMMAND mkdir -p ${CMAKE_BINARY_DIR}/pcg/lib ${CMAKE_BINARY_DIR}/pcg/include && sed "s|PREFIX = /usr/local|PREFIX = ${CMAKE_BINARY_DIR}/pcg|" Makefile | sed -E "/cd / { /cd src/! s|^|#| }" > ${PCG_SRC}/termux.patch.cmake
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C ${PCG_SRC}/ -f ${PCG_SRC}/termux.patch.cmake
   INSTALL_COMMAND make -C ${PCG_SRC}/ -f ${PCG_SRC}/termux.patch.cmake install
@@ -73,10 +75,9 @@ set_target_properties(${TARGET} PROPERTIES LINK_DEPENDS ${VERSION_SCRIPT})
 target_include_directories(${TARGET} PRIVATE ${CMAKE_BINARY_DIR}/zot/include )
 target_include_directories(${TARGET} PRIVATE ${CMAKE_BINARY_DIR}/pcg/include )
 target_include_directories(${TARGET} PRIVATE ${PCG_SRC}/extras )
-target_link_libraries(${TARGET} PRIVATE ${CMAKE_BINARY_DIR}/zot/bin/libzot.so)
-target_link_libraries(${TARGET} PRIVATE ${CMAKE_BINARY_DIR}/pcg/lib/libpcg_random.a)
-add_dependencies(${TARGET} Zot)
-add_dependencies(${TARGET} pcg-c)
+target_link_directories(${TARGET} PRIVATE ${CMAKE_BINARY_DIR}/zot/bin/ ${CMAKE_BINARY_DIR}/pcg/lib/)
+target_link_libraries(${TARGET} PRIVATE zot pcg_random)
+add_dependencies(${TARGET} Zot pcg-c)
 
 add_executable(example-0 examples/example-0.c)
 target_link_libraries(example-0 PRIVATE ${TARGET})
