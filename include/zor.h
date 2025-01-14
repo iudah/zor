@@ -19,7 +19,7 @@ zor *zor_reshape(zor *restrict tensor, uint8_t rank, uint32_t *shape);
 
 zor *zor_transpose(zor *restrict tensor, int32_t *restrict axes);
 
-#define ELLIPSIS ((int)2147483647)
+#define ELLIPSIS ((void *)0x1)
 zor *zor_slice(zor *tensor, uint32_t n_slice_triples,
                int32_t **restrict slice_triples);
 
@@ -29,7 +29,7 @@ zor_get_element(zor *restrict tensor, const int *restrict indices,
                 float *restrict value);
 
 __attribute__((
-    warn_unused_result("Ensure to check return value of function"))) bool bool
+    warn_unused_result("Ensure to check return value of function"))) bool
 zor_set_element(zor *restrict tensor, const int *restrict indices, float value);
 
 zor *zor_add(zor *a, zor *b);

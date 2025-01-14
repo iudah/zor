@@ -5,6 +5,7 @@
 #include <string.h>
 #define __STDC_WANT_IEC_60559_FUNC_EXT__ 1
 #define __STDC_WANT_IEC_60559_DFB_EXT__ 1
+#include "../include/zor.h"
 #include "../include/zor_simd_defines.h"
 #include <entropy.h>
 #include <float.h>
@@ -970,3 +971,77 @@ zor *zor_max(zor *restrict tensor, int axis) {
   return zor_reduce(tensor, axis, NULL, scalar_max, SIMD_max, SIMD_reduce_max);
 }
 
+zor *zor_matmul(zor *a, zor *b) {
+  if (!a || !b) {
+    LOG_ERROR("Input tensors cannot be NULL.");
+    return NULL;
+  }
+  if (a->rank < 2 || b->rank < 2) {
+    LOG_ERROR("Matrix multiplication requires tensors with rank >= 2. Received "
+              "A.rank = %" PRIu8 ", B.rank = %" PRIu8 ".",
+              a->rank, b->rank);
+    return NULL;
+  }
+  if (a->shape[a->rank - 1] != b->shape[b->rank - 2]) {
+    LOG_ERROR("Shapes are incompatible for matrix multiplication. A.shape[%d] "
+              "= %" PRIu32 " does not match B.shape[%d] = %" PRIu32 ".",
+              a->rank - 1, a->shape[a->rank - 1], b->rank - 2,
+              b->shape[b->rank - 2]);
+    return NULL;
+  }
+
+  int res_rank = a->rank + b->rank - 2;
+  zor *transposed_b = b;
+
+  if (b->rank > 2) {
+    int transpose[b->rank];
+    transpose[0] = b->rank - 2;
+    int k = 1;
+    for (int i = 0; i < b->rank; i++) {
+      if (i != transpose[0])
+        transpose[k++] = i;
+    }
+    transposed_b = zor_transpose(b, transpose);
+    if (!transposed_b) {
+      LOG_ERROR("Failed to transpose tensor b.");
+      return NULL;
+    }
+  }
+
+  uint32_t shape[res_rank];
+  memcpy(shape, a->shape, sizeof(int) * (a->rank - 1));
+  memcpy(shape + a->rank - 1, transposed_b->shape + 1,
+         sizeof(int) * (transposed_b->rank - 1));
+
+  zor *res = zor_init(res_rank, shape);
+  if (!res) {
+    LOG_ERROR("Failed to allocate result tensor.");
+    if (b != transposed_b)
+      zor_free(transposed_b);
+    return NULL;
+  }
+
+  int common_dims = transposed_b->shape[0];
+  int rows = a->data_size / common_dims;
+  int cols = transposed_b->data_size / common_dims;
+
+  int CACHE_LEN = 16; // Adjust based on hardware
+
+  for (int j = 0; j < common_dims; j += CACHE_LEN) {
+    for (int c = 0; c < cols; c += CACHE_LEN) {
+      for (int r = 0; r < rows; r++) {
+        for (int m = 0; m < CACHE_LEN && (m + j < common_dims); m++) {
+          for (int k = 0; k < CACHE_LEN && (c + k < cols); k++) {
+            res->data[r * cols + c + k] +=
+                a->data[r * common_dims + j + m] *
+                transposed_b->data[(j + m) * cols + c + k];
+          }
+        }
+      }
+    }
+  }
+
+  if (b != transposed_b)
+    zor_free(transposed_b);
+  return res;
+}
