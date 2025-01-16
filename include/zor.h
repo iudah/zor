@@ -48,4 +48,12 @@ zor *zor_max(zor *restrict tensor, int axis);
 
 zor *zor_min(zor *restrict tensor, int axis);
 
+zor *zor_matmul(zor *a, zor *b);
+
+zor *zor_tensordot(zor *a, zor *b, int32_t n_axes, int32_t *a_axes, int32_t *b_axes);
+
+zor *zor_copy(zor *restrict tensor);
+
+zor *zor_negative(zor *restrict tensor);
+
 #endif

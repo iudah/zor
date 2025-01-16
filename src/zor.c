@@ -403,6 +403,7 @@ bool zor_set_element(zor *restrict tensor, const int *restrict indices,
 #define SIMD_STRIDE 8
 #if defined(use_bfp16)
 #define LOAD_SIMD vld1q_bf16
+#define DUP_N_SIMD vdupq_n_bf16
 #define STORE_SIMD vst1q_bf16
 
 #define SIMD_add vaddq_bf16
@@ -410,6 +411,7 @@ bool zor_set_element(zor *restrict tensor, const int *restrict indices,
 
 #elif defined(use_float16)
 #define LOAD_SIMD vld1q_f16
+#define DUP_N_SIMD vdupq_n_f16
 #define STORE_SIMD vst1q_f16
 #define SIMD_initial_reciprocal vrecpeq_f16
 #define SIMD_correction_factor vrecpsq_f16
@@ -428,6 +430,7 @@ bool zor_set_element(zor *restrict tensor, const int *restrict indices,
 
 #define SIMD_STRIDE 4
 #define LOAD_SIMD vld1q_f32
+#define DUP_N_SIMD vdupq_n_f32
 #define STORE_SIMD vst1q_f32
 
 #define SIMD_add vaddq_f32
@@ -941,7 +944,7 @@ zor *zor_mean(zor *restrict tensor, int axis) {
 
     if (mean->data_size >= SIMD_STRIDE) {
 #if SIMD_STRIDE > 1
-      auto divisor_vector = vdupq_n_f32(divisor);
+      auto divisor_vector = DUP_N_SIMD(divisor);
 #endif
       auto i = 0;
 #if SIMD_STRIDE > 1
@@ -1044,4 +1047,210 @@ zor *zor_matmul(zor *a, zor *b) {
   if (b != transposed_b)
     zor_free(transposed_b);
   return res;
+}
+
+zor *zor_tensordot(zor *a, zor *b, int32_t n_axes, int32_t *a_axes,
+                   int32_t *b_axes) {
+  if (!a || !b) {
+    LOG_ERROR("Input tensors cannot be NULL.");
+    return NULL;
+  }
+
+  if (n_axes == 0) {
+    LOG_ERROR("Number of contracting axes must be greater than 0.");
+    return NULL;
+  }
+
+  if (a->rank == 0 || b->rank == 0)
+    return zor_multiply(a, b);
+
+  bool a_axes_used[a->rank];
+  bool b_axes_used[b->rank];
+  auto i = a->rank, j = b->rank;
+  while (i || j) {
+    if (i)
+      a_axes_used[--i] = false;
+    if (j)
+      b_axes_used[--j] = false;
+  }
+
+  auto a_untouched_length = 1;
+  auto b_untouched_length = 1;
+  auto common_touched_length = 1;
+
+  auto n_a_untouched_axes = a->rank - n_axes;
+  auto n_b_untouched_axes = b->rank - n_axes;
+
+  bool transpose_a = false;
+
+  int32_t a_transpose[a->rank];
+  int32_t b_transpose[b->rank];
+
+  for (auto i = 0; i < n_axes; i++) {
+    if (a_axes[i] < 0) {
+      a_axes[i] += a->rank;
+    }
+    if (b_axes[i] < 0) {
+      b_axes[i] += b->rank;
+    }
+    if (a_axes[i] < 0 || b_axes[i] < 0 || a_axes[i] >= a->rank ||
+        b_axes[i] >= b->rank) {
+      LOG_ERROR("Axes out of bounds.");
+      return NULL;
+    }
+    if (a_axes_used[a_axes[i]] || b_axes_used[b_axes[i]]) {
+      LOG_ERROR("Axes already used.");
+      return NULL;
+    }
+    if (a->shape[a_axes[i]] != b->shape[b_axes[i]]) {
+      LOG_ERROR("Axes do not match.");
+      return NULL;
+    }
+    if (a_axes[i] != i)
+      transpose_a = true;
+
+    (a_transpose + n_a_untouched_axes)[i] = a_axes[i];
+    b_transpose[i] = b_axes[i];
+
+    common_touched_length *= b->shape[b_axes[i]];
+
+    a_axes_used[a_axes[i]] = true;
+    b_axes_used[b_axes[i]] = true;
+  }
+
+  uint32_t result_rank = a->rank - n_axes + b->rank - n_axes;
+  uint32_t *result_shape = zcalloc(result_rank, sizeof(*result_shape));
+  if (!result_shape) {
+    LOG_ERROR("Failed to allocate result shape.");
+    return NULL;
+  }
+
+  i = j = 0;
+  auto m = 0, n = n_b_untouched_axes, k = n_a_untouched_axes;
+  while (n < b->rank || (m < n_a_untouched_axes)) {
+    if ((i < a->rank)) {
+      if (!a_axes_used[i]) {
+        a_transpose[m] = i;
+        a_untouched_length *= result_shape[m] = a->shape[i];
+        m++;
+      }
+    }
+    if (i < b->rank) {
+      if (!b_axes_used[i]) {
+        b_transpose[n++] = i;
+        b_untouched_length *= result_shape[k++] = b->shape[i];
+      }
+    }
+    i++;
+  }
+
+  auto transposed_a = transpose_a ? zor_transpose(a, a_transpose) : a;
+  auto transposed_b = zor_transpose(b, b_transpose);
+
+  uint32_t a_shape[] = {a_untouched_length, common_touched_length, 1};
+  uint32_t b_shape[] = {common_touched_length, b_untouched_length, 1};
+  auto a_original_shape = a->shape;
+  auto a_original_stride = a->strides;
+
+  void *transpose_cache[] = {
+      transposed_a->shape,
+      transposed_a->strides,
+      transposed_b->shape,
+      transposed_b->strides,
+
+  };
+
+  uint8_t rank_cache[] = {
+      transposed_a->rank,
+      transposed_b->rank,
+  };
+
+  transposed_a->rank = 2;
+  transposed_b->rank = 2;
+  transposed_a->shape = a_shape;
+  transposed_a->strides = a_shape + 1;
+  transposed_b->shape = b_shape;
+  transposed_b->strides = b_shape + 1;
+
+  auto result = zor_matmul(transposed_a, transposed_b);
+  zfree(result->shape);
+  zfree(result->strides);
+
+  result->shape = result_shape;
+  result->rank = result_rank;
+  result->strides = zcalloc(result->rank, sizeof(*result->strides));
+  result->strides[0] = 1;
+  for (int i = 1; i < result->rank; i++) {
+    result->strides[i] = result->strides[i - 1] * result->shape[i];
+  }
+
+  transposed_a->rank = rank_cache[0];
+  transposed_b->rank = rank_cache[1];
+  transposed_a->shape = transpose_cache[0];
+  transposed_a->strides = transpose_cache[1];
+  transposed_b->shape = transpose_cache[2];
+  transposed_b->strides = transpose_cache[3];
+
+  if (transposed_a == a) {
+    a->rank = n_axes + n_a_untouched_axes;
+    a->shape = a_original_shape;
+    a->strides = a_original_stride;
+  } else {
+    zor_free(transposed_a);
+  }
+  zor_free(transposed_b);
+
+  return result;
+}
+
+zor *zor_copy(zor *restrict tensor) {
+  if (!tensor) {
+    LOG_ERROR("Input tensors cannot be NULL.");
+    return NULL;
+  }
+
+  zor *result = zor_init(tensor->rank, tensor->shape);
+  if (!result) {
+    LOG_ERROR("Failed to initialize output tensor.");
+    return NULL;
+  }
+
+  uint64_t i = 0;
+#if SIMD_STRIDE > 1
+  for (i = 0; (i + SIMD_STRIDE) < tensor->data_size; i += SIMD_STRIDE) {
+    auto simd_copy = LOAD_SIMD(tensor->data + i);
+    STORE_SIMD(result->data + i, simd_copy);
+  }
+#endif
+  for (; i < tensor->data_size; i++) {
+    result->data[i] = tensor->data[i];
+  }
+  return result;
+}
+
+zor *zor_negative(zor *restrict tensor) {
+  if (!tensor) {
+    LOG_ERROR("Input tensors cannot be NULL.");
+    return NULL;
+  }
+
+  zor *result = zor_init(tensor->rank, tensor->shape);
+  if (!result) {
+    LOG_ERROR("Failed to initialize output tensor.");
+    return NULL;
+  }
+
+  uint64_t i = 0;
+#if SIMD_STRIDE > 1
+  auto neg = DUP_N_SIMD(-1.);
+  for (i = 0; (i + SIMD_STRIDE) < tensor->data_size; i += SIMD_STRIDE) {
+    auto vec = LOAD_SIMD(tensor->data + i);
+    auto neg_vec = SIMD_multiply(neg, vec);
+    STORE_SIMD(result->data + i, neg_vec);
+  }
+#endif
+  for (; i < tensor->data_size; i++) {
+    result->data[i] = -tensor->data[i];
+  }
+  return result;
 }
