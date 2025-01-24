@@ -9,6 +9,8 @@ zor *zor_init(uint8_t rank, uint32_t *restrict shape);
 
 void zor_free(zor *restrict tensor);
 
+zor *zor_ones(uint8_t rank, uint32_t *restrict shape);
+
 zor *zor_zeros(uint8_t rank, uint32_t *restrict shape);
 
 void zor_srandom(uint64_t seed);
@@ -50,7 +52,8 @@ zor *zor_min(zor *restrict tensor, int axis);
 
 zor *zor_matmul(zor *a, zor *b);
 
-zor *zor_tensordot(zor *a, zor *b, int32_t n_axes, int32_t *a_axes, int32_t *b_axes);
+zor *zor_tensordot(zor *a, zor *b, int32_t n_axes, int32_t *a_axes,
+                   int32_t *b_axes);
 
 zor *zor_copy(zor *restrict tensor);
 

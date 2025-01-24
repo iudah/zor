@@ -12,6 +12,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(C_WARNINGS "-Wall -Wextra -Wshadow -Wformat=2 -Wunused")
 
 # Set flags for Debug and Release configurations
+set(CMAKE_C_FLAGS     "${CMAKE_C_FLAGS} -lm -mfpu=neon")
 set(CMAKE_C_FLAGS_DEBUG     "${CMAKE_C_FLAGS_DEBUG} -ggdb3 -O0 -fno-omit-frame-pointer -fsanitize=address -fsanitize=undefined -static-libsan -mfpu=neon")
 set(CMAKE_C_FLAGS_RELEASE   "${CMAKE_C_FLAGS_RELEASE} -O3 ")
 
@@ -27,16 +28,14 @@ endif()
 include(sources.cmake)
 include(headers.cmake)
 
-
 include(ExternalProject)
 
 ExternalProject_Add(
   Zot
-  SOURCE_DIR /sdcard/Jay/Projects/xab_laud_ubject/zmemory/
+  SOURCE_DIR /sdcard/Jay/Projects/xab_laud_ubject/zot
   CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/zot
   BUILD_ALWAYS TRUE
-  #INSTALL_COMMAND ${CMAKE_COMMAND} --install .
-  BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/zot/bin/libzot.so
+  BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/zot/lib/libzot.so
 )
 
 set(PCG_SRC /sdcard/Jay/Projects/xab_laud_ubject/pcg-c)
@@ -75,14 +74,14 @@ set_target_properties(${TARGET} PROPERTIES LINK_DEPENDS ${VERSION_SCRIPT})
 target_include_directories(${TARGET} PRIVATE ${CMAKE_BINARY_DIR}/zot/include )
 target_include_directories(${TARGET} PRIVATE ${CMAKE_BINARY_DIR}/pcg/include )
 target_include_directories(${TARGET} PRIVATE ${PCG_SRC}/extras )
-target_link_directories(${TARGET} PRIVATE ${CMAKE_BINARY_DIR}/zot/bin/ ${CMAKE_BINARY_DIR}/pcg/lib/)
+target_link_directories(${TARGET} PRIVATE ${CMAKE_BINARY_DIR}/zot/lib/ ${CMAKE_BINARY_DIR}/pcg/lib/)
 target_link_libraries(${TARGET} PRIVATE zot pcg_random)
 add_dependencies(${TARGET} Zot pcg-c)
 
 add_executable(example-0 examples/example-0.c)
 target_link_libraries(example-0 PRIVATE ${TARGET})
 target_include_directories(example-0 PRIVATE ${CMAKE_BINARY_DIR}/zot/include )
-target_link_libraries(example-0 PRIVATE ${CMAKE_BINARY_DIR}/zot/bin/libzot.so)
+target_link_libraries(example-0 PRIVATE ${CMAKE_BINARY_DIR}/zot/lib/libzot.so)
 
 # Tests section
 # Option to enable or disable tests
