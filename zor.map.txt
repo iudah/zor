@@ -1,4 +1,32 @@
 ZOBJECT{
+    global:
+        zor_init;
+        zor_free;
+        zor_zeros;
+        zor_ones;
+        zor_fill;
+        zor_srandom;
+        zor_random;
+        zor_reshape;
+        zor_transpose;
+        zor_slice;
+        zor_get_element;
+        zor_set_element;
+        zor_add;
+        zor_subtract;
+        zor_multiply;
+        zor_divide;
+        zor_sum;
+        zor_max;
+        zor_min;
+        zor_mean;
+        zor_matmul;
+        zor_copy;
+        zor_negative;
+        zor_rank;
+        zor_shape;
+        zor_tensordot;
+        zor_swap_*;
     local:
     *;
 };

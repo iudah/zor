@@ -20,7 +20,7 @@ typedef struct zor {
   uint8_t rank;
 } zor;
 
-zor *zor_init(uint8_t rank, uint32_t *restrict shape) {
+void *zor_init(uint8_t rank, uint32_t *restrict shape) {
   if (rank == 0 || shape == NULL) {
     LOG_ERROR(
         "Invalid input: Rank must be greater than 0, and shape cannot be NULL");
@@ -70,7 +70,53 @@ zor *zor_init(uint8_t rank, uint32_t *restrict shape) {
   return tensor;
 }
 
-void zor_free(zor *restrict tensor) {
+uint8_t zor_rank(void *restrict tensor) { return ((zor *)tensor)->rank; }
+
+uint32_t *zor_shape(void *restrict self, uint32_t *shape) {
+  if (shape) {
+    zor *restrict tensor = self;
+    memcpy(shape, tensor->shape, tensor->rank * sizeof(*shape));
+  }
+  return shape;
+}
+
+void zor_swap_repr(void *restrict self, void *restrict other) {
+  zor *restrict tensor = self;
+  zor *restrict swap = other;
+
+  uint32_t *restrict shape = tensor->shape;
+  uint8_t rank = tensor->rank;
+  auto strides = tensor->strides;
+  auto data_size = tensor->data_size;
+  auto data = tensor->data;
+
+  tensor->shape = swap->shape;
+  tensor->data = swap->data;
+  tensor->shape = swap->shape;
+  tensor->rank = swap->rank;
+  tensor->data_size = swap->data_size;
+  tensor->strides = swap->strides;
+
+  swap->shape = shape;
+  swap->data = data;
+  swap->shape = shape;
+  swap->rank = rank;
+  swap->data_size = data_size;
+  swap->strides = strides;
+}
+
+void zor_swap_array(void *restrict self, void *restrict other) {
+  zor *restrict tensor = self;
+  zor *restrict swap = other;
+
+  auto data = tensor->data;
+
+  tensor->data_size = swap->data_size;
+  swap->data = data;
+}
+
+void zor_free(void *restrict self) {
+  zor *restrict tensor = self;
   if (tensor == NULL)
     return; // Nothing to free
   if (tensor->data)
@@ -82,11 +128,11 @@ void zor_free(zor *restrict tensor) {
   zfree(tensor);
 }
 
-zor *zor_zeros(uint8_t rank, uint32_t *restrict shape) {
+void *zor_zeros(uint8_t rank, uint32_t *restrict shape) {
   return zor_init(rank, shape);
 }
 
-zor *zor_ones(uint8_t rank, uint32_t *restrict shape) {
+static void *zor_test_linear(uint8_t rank, uint32_t *restrict shape) {
   zor *tensor = zor_init(rank, shape);
   if (tensor == NULL) {
     return NULL;
@@ -94,6 +140,22 @@ zor *zor_ones(uint8_t rank, uint32_t *restrict shape) {
 
   for (uint64_t i = 0; i < tensor->data_size; i++) {
     tensor->data[i] = (zfl)1. * i;
+  }
+
+  return tensor;
+}
+
+void *zor_ones(uint8_t rank, uint32_t *restrict shape) {
+  return zor_fill(rank, shape, 1);
+}
+void *zor_fill(uint8_t rank, uint32_t *restrict shape, float value) {
+  zor *tensor = zor_init(rank, shape);
+  if (tensor == NULL) {
+    return NULL;
+  }
+
+  for (uint64_t i = 0; i < tensor->data_size; i++) {
+    tensor->data[i] = (zfl)value;
   }
 
   return tensor;
@@ -108,7 +170,7 @@ void zor_srandom(uint64_t seed) {
   pcg32_srandom(seed, 54u);
 }
 
-zor *zor_random(uint8_t rank, uint32_t *restrict shape, float min, float max) {
+void *zor_random(uint8_t rank, uint32_t *restrict shape, float min, float max) {
   if (max < min) {
     LOG_ERROR("Invalid range. Minimum value must be less than maximum value");
     return NULL;
@@ -135,7 +197,8 @@ zor *zor_random(uint8_t rank, uint32_t *restrict shape, float min, float max) {
   return tensor;
 }
 
-zor *zor_reshape(zor *restrict tensor, uint8_t rank, uint32_t *shape) {
+void *zor_reshape(void *restrict self, uint8_t rank, uint32_t *shape) {
+  zor *restrict tensor = self;
   if (tensor == NULL) {
     LOG_ERROR("Invalid input. Tensor must not be NULL");
     return NULL;
@@ -161,7 +224,9 @@ zor *zor_reshape(zor *restrict tensor, uint8_t rank, uint32_t *shape) {
   return reshaped_tensor;
 }
 
-zor *zor_transpose(zor *restrict tensor, int32_t *restrict axes) {
+void *zor_transpose(void *restrict self, int32_t *restrict axes) {
+  zor *restrict tensor = self;
+
   if (tensor == NULL) {
     LOG_ERROR("Invalid input. Tensor must not be NULL");
     return NULL;
@@ -235,8 +300,10 @@ zor *zor_transpose(zor *restrict tensor, int32_t *restrict axes) {
   return transpose;
 }
 
-zor *zor_slice(zor *tensor, uint32_t n_slice_triples,
-               int32_t **restrict slice_triples) {
+void *zor_slice(void *self, uint32_t n_slice_triples,
+                int32_t **restrict slice_triples) {
+  zor *restrict tensor = self;
+
   if (tensor == NULL) {
     LOG_ERROR("Invalid input. Tensor must not be NULL");
     return NULL;
@@ -353,8 +420,10 @@ zor *zor_slice(zor *tensor, uint32_t n_slice_triples,
 
 __attribute__((
     warn_unused_result("Ensure to check return value of function"))) bool
-zor_get_element(zor *restrict tensor, const int *restrict indices,
+zor_get_element(void *restrict self, const int *restrict indices,
                 float *restrict value) {
+  zor *restrict tensor = self;
+
   if (tensor == NULL) {
     LOG_ERROR("Invalid input. Tensor must not be NULL");
     return NULL;
@@ -374,8 +443,10 @@ zor_get_element(zor *restrict tensor, const int *restrict indices,
   return true;
 }
 
-bool zor_set_element(zor *restrict tensor, const int *restrict indices,
+bool zor_set_element(void *restrict self, const int *restrict indices,
                      float value) {
+  zor *restrict tensor = self;
+
   if (tensor == NULL) {
     LOG_ERROR("Invalid input. Tensor must not be NULL");
     return NULL;
@@ -668,9 +739,11 @@ static void increment_pairwise_indices(zor *tensor, zor *a, zor *b,
   }
 }
 
-zor *zor_pairwise(zor *a, zor *b, zfl (*scalar_binary_operation)(zfl a, zfl b),
-                  SIMD_type (*simd_binary_operation)(SIMD_type a,
-                                                     SIMD_type b)) {
+void *zor_pairwise(void *self, void *other,
+                   zfl (*scalar_binary_operation)(zfl a, zfl b),
+                   SIMD_type (*simd_binary_operation)(SIMD_type a,
+                                                      SIMD_type b)) {
+  zor *a = self, *b = other;
   if (a == NULL || b == NULL) {
     LOG_ERROR("Invalid input. Tensor must not be NULL. Please ensure the "
               "tensor is properly initialized before using it.");
@@ -758,22 +831,22 @@ zor *zor_pairwise(zor *a, zor *b, zfl (*scalar_binary_operation)(zfl a, zfl b),
 }
 
 static zfl scalar_add(zfl a, zfl b) { return a + b; }
-zor *zor_add(zor *a, zor *b) {
+void *zor_add(void *a, void *b) {
   return zor_pairwise(a, b, scalar_add, SIMD_add);
 }
 
 static zfl scalar_subtract(zfl a, zfl b) { return a - b; }
-zor *zor_subtract(zor *a, zor *b) {
+void *zor_subtract(void *a, void *b) {
   return zor_pairwise(a, b, scalar_subtract, SIMD_subtract);
 }
 
 static zfl scalar_multiply(zfl a, zfl b) { return a * b; }
-zor *zor_multiply(zor *a, zor *b) {
+void *zor_multiply(void *a, void *b) {
   return zor_pairwise(a, b, scalar_multiply, SIMD_multiply);
 }
 
 static zfl scalar_divide(zfl a, zfl b) { return a / b; }
-zor *zor_divide(zor *a, zor *b) {
+void *zor_divide(void *a, void *b) {
   return zor_pairwise(a, b, scalar_divide, SIMD_divide);
 }
 
@@ -859,10 +932,11 @@ static void perform_axis_reduction(
   }
 }
 
-zor *zor_reduce(zor *restrict tensor, int32_t reduce_axis, int32_t *axis_ptr,
-                zfl (*scalar_binary_operation)(zfl a, zfl b),
-                SIMD_type (*simd_binary_operation)(SIMD_type a, SIMD_type b),
-                zfl (*simd_reduction_operation)(SIMD_type)) {
+void *zor_reduce(void *restrict self, int32_t reduce_axis, int32_t *axis_ptr,
+                 zfl (*scalar_binary_operation)(zfl a, zfl b),
+                 SIMD_type (*simd_binary_operation)(SIMD_type a, SIMD_type b),
+                 zfl (*simd_reduction_operation)(SIMD_type)) {
+  zor *tensor = self;
   if (tensor == NULL) {
     LOG_ERROR("Invalid input. Tensor must not be NULL");
     return NULL;
@@ -931,12 +1005,13 @@ zor *zor_reduce(zor *restrict tensor, int32_t reduce_axis, int32_t *axis_ptr,
   return result;
 }
 
-zor *zor_sum(zor *restrict tensor, int axis) {
+void *zor_sum(void *restrict tensor, int axis) {
   return zor_reduce(tensor, axis, NULL, scalar_add, SIMD_add, SIMD_sum);
 }
 
-zor *zor_mean(zor *restrict tensor, int axis) {
-  auto mean = zor_reduce(tensor, axis, &axis, scalar_add, SIMD_add, SIMD_sum);
+void *zor_mean(void *restrict self, int axis) {
+  zor *tensor = self;
+  zor *mean = zor_reduce(tensor, axis, &axis, scalar_add, SIMD_add, SIMD_sum);
   if (mean) {
 
     zfl divisor = (zfl)(axis != ZOR_REDUCE_AXIS_NONE ? tensor->shape[axis]
@@ -966,15 +1041,16 @@ zor *zor_mean(zor *restrict tensor, int axis) {
 }
 
 static zfl scalar_min(zfl a, zfl b) { return fminf((float)a, (float)b); }
-zor *zor_min(zor *restrict tensor, int axis) {
+void *zor_min(void *restrict tensor, int axis) {
   return zor_reduce(tensor, axis, NULL, scalar_min, SIMD_min, SIMD_reduce_min);
 }
 static zfl scalar_max(zfl a, zfl b) { return fmaxf((float)a, (float)b); }
-zor *zor_max(zor *restrict tensor, int axis) {
+void *zor_max(void *restrict tensor, int axis) {
   return zor_reduce(tensor, axis, NULL, scalar_max, SIMD_max, SIMD_reduce_max);
 }
 
-zor *zor_matmul(zor *a, zor *b) {
+void *zor_matmul(void *self, void *other) {
+  zor *a = self, *b = other;
   if (!a || !b) {
     LOG_ERROR("Input tensors cannot be NULL.");
     return NULL;
@@ -1049,8 +1125,9 @@ zor *zor_matmul(zor *a, zor *b) {
   return res;
 }
 
-zor *zor_tensordot(zor *a, zor *b, int32_t n_axes, int32_t *a_axes,
-                   int32_t *b_axes) {
+void *zor_tensordot(void *self, void *other, int32_t n_axes, int32_t *a_axes,
+                    int32_t *b_axes) {
+  zor *a = self, *b = other;
   if (!a || !b) {
     LOG_ERROR("Input tensors cannot be NULL.");
     return NULL;
@@ -1144,8 +1221,8 @@ zor *zor_tensordot(zor *a, zor *b, int32_t n_axes, int32_t *a_axes,
     i++;
   }
 
-  auto transposed_a = transpose_a ? zor_transpose(a, a_transpose) : a;
-  auto transposed_b = zor_transpose(b, b_transpose);
+  zor *transposed_a = transpose_a ? zor_transpose(a, a_transpose) : a;
+  zor *transposed_b = zor_transpose(b, b_transpose);
 
   uint32_t a_shape[] = {a_untouched_length, common_touched_length, 1};
   uint32_t b_shape[] = {common_touched_length, b_untouched_length, 1};
@@ -1172,7 +1249,7 @@ zor *zor_tensordot(zor *a, zor *b, int32_t n_axes, int32_t *a_axes,
   transposed_b->shape = b_shape;
   transposed_b->strides = b_shape + 1;
 
-  auto result = zor_matmul(transposed_a, transposed_b);
+  zor *result = zor_matmul(transposed_a, transposed_b);
   zfree(result->shape);
   zfree(result->strides);
 
@@ -1203,7 +1280,9 @@ zor *zor_tensordot(zor *a, zor *b, int32_t n_axes, int32_t *a_axes,
   return result;
 }
 
-zor *zor_copy(zor *restrict tensor) {
+void *zor_copy(void *restrict self) {
+  zor *restrict tensor = self;
+
   if (!tensor) {
     LOG_ERROR("Input tensors cannot be NULL.");
     return NULL;
@@ -1228,7 +1307,9 @@ zor *zor_copy(zor *restrict tensor) {
   return result;
 }
 
-zor *zor_negative(zor *restrict tensor) {
+void *zor_negative(void *restrict self) {
+  zor *restrict tensor = self;
+
   if (!tensor) {
     LOG_ERROR("Input tensors cannot be NULL.");
     return NULL;
