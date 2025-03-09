@@ -7,6 +7,7 @@ ZOBJECT{
         zor_fill;
         zor_srandom;
         zor_random;
+        zor_from_array;
         zor_reshape;
         zor_transpose;
         zor_slice;
@@ -27,6 +28,8 @@ ZOBJECT{
         zor_shape;
         zor_tensordot;
         zor_swap_*;
+        zor_relu;
+        zor_to_string;
     local:
     *;
 };

@@ -23,6 +23,8 @@ void *zor_zeros(uint8_t rank, uint32_t *restrict shape);
 
 void *zor_fill(uint8_t rank, uint32_t *restrict shape, float value);
 
+void *zor_from_array(uint8_t rank, uint32_t *shape, float *numbers);
+
 void zor_srandom(uint64_t seed);
 
 void *zor_random(uint8_t rank, uint32_t *restrict shape, float min, float max);
@@ -53,6 +55,7 @@ void *zor_multiply(void *a, void *b);
 
 void *zor_divide(void *a, void *b);
 
+#define ZOR_REDUCE_AXIS_NONE ((uint8_t)-1)
 void *zor_sum(void *restrict tensor, int axis);
 
 void *zor_mean(void *restrict tensor, int axis);
@@ -69,5 +72,9 @@ void *zor_tensordot(void *a, void *b, int32_t n_axes, int32_t *a_axes,
 void *zor_copy(void *restrict tensor);
 
 void *zor_negative(void *restrict tensor);
+
+void *zor_relu(void *restrict tensor);
+
+uint64_t zor_to_string(void *tensor, char *buffer, uint64_t buffer_limit);
 
 #endif

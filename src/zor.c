@@ -148,6 +148,7 @@ static void *zor_test_linear(uint8_t rank, uint32_t *restrict shape) {
 void *zor_ones(uint8_t rank, uint32_t *restrict shape) {
   return zor_fill(rank, shape, 1);
 }
+
 void *zor_fill(uint8_t rank, uint32_t *restrict shape, float value) {
   zor *tensor = zor_init(rank, shape);
   if (tensor == NULL) {
@@ -192,6 +193,20 @@ void *zor_random(uint8_t rank, uint32_t *restrict shape, float min, float max) {
   for (uint64_t i = 0; i < tensor->data_size; i++) {
     tensor->data[i] =
         (zfl)(min + width * (float)(pcg32_random() / (double)UINT32_MAX));
+  }
+
+  return tensor;
+}
+
+void *zor_from_array(uint8_t rank, uint32_t *shape, float *numbers) {
+
+  zor *tensor = zor_init(rank, shape);
+  if (tensor == NULL) {
+    return NULL;
+  }
+
+  for (uint64_t i = 0; i < tensor->data_size; i++) {
+    tensor->data[i] = (zfl)(numbers[i]);
   }
 
   return tensor;
@@ -479,6 +494,7 @@ bool zor_set_element(void *restrict self, const int *restrict indices,
 
 #define SIMD_add vaddq_bf16
 #define SIMD_subtract vsubq_bf16
+#define SIMD_additive_inverse vnegq_bf16
 
 #elif defined(use_float16)
 #define LOAD_SIMD vld1q_f16
@@ -506,6 +522,7 @@ bool zor_set_element(void *restrict self, const int *restrict indices,
 
 #define SIMD_add vaddq_f32
 #define SIMD_subtract vsubq_f32
+#define SIMD_additive_inverse vnegq_f32
 
 #else
 #define SIMD_STRIDE 1
@@ -738,7 +755,6 @@ static void increment_pairwise_indices(zor *tensor, zor *a, zor *b,
     break;
   }
 }
-
 void *zor_pairwise(void *self, void *other,
                    zfl (*scalar_binary_operation)(zfl a, zfl b),
                    SIMD_type (*simd_binary_operation)(SIMD_type a,
@@ -830,6 +846,92 @@ void *zor_pairwise(void *self, void *other,
   return result;
 }
 
+struct unary_pairwise_data {
+  zfl scalar;
+  bool scalar_is_first;
+};
+
+void *zor_unary_pairwise(void *self, struct unary_pairwise_data *scalar_float,
+                         zfl (*scalar_binary_operation)(zfl a, zfl b),
+                         SIMD_type (*simd_binary_operation)(SIMD_type a,
+                                                            SIMD_type b)) {
+  zor *a = self;
+  struct unary_pairwise_data *other = scalar_float;
+  if (a == NULL || other == NULL) {
+    LOG_ERROR("Invalid input. Tensor must not be NULL. Please ensure the "
+              "tensor is properly initialized before using it.");
+    return NULL;
+  }
+  uint32_t *shape = a->shape;
+  bool require_broadcast = false;
+  // if (!is_element_wise_compatible(a, b, &require_broadcast, shape)) {
+  //   LOG_ERROR("Incompatible shapes for addition. Please ensure "
+  //             "the shapes ");
+  //   return NULL;
+  // }
+  zor *result = zor_init(a->rank, shape);
+  if (!result)
+    return NULL;
+  uint64_t total_rank;
+  uint32_t indices[total_rank = a->rank + result->rank];
+  auto a_index = indices;
+  auto result_index = a_index + a->rank;
+  if (require_broadcast) {
+    memset(indices, 0, sizeof(indices));
+  }
+  uint32_t a_i = 0;
+  zfl bc[SIMD_STRIDE];
+  zfl *a_data = bc;
+  uint32_t a_offset = 0;
+  const auto a_rank_difference = result->rank - a->rank;
+
+  auto other_simd_vector = DUP_N_SIMD(((other->scalar)));
+  uint64_t i = 0;
+  for (; (i + SIMD_STRIDE) <= result->data_size; i += SIMD_STRIDE) {
+    if (require_broadcast) {
+    } else {
+      a_data = a->data + i;
+      a_offset = i;
+    }
+#if SIMD_STRIDE > 1
+    if (simd_binary_operation) {
+      auto a_simd_vector = LOAD_SIMD(((a_data)));
+      auto simd_result = simd_binary_operation(
+          other->scalar_is_first ? other_simd_vector : a_simd_vector,
+          other->scalar_is_first ? a_simd_vector : other_simd_vector);
+
+      STORE_SIMD((result->data + i), simd_result);
+    } else {
+#endif
+      if (scalar_binary_operation) {
+        result->data[i] = (zfl)scalar_binary_operation(
+
+            other->scalar_is_first ? other->scalar : a->data[a_offset],
+            other->scalar_is_first ? a->data[a_offset] : other->scalar);
+      }
+#if SIMD_STRIDE > 1
+      else {
+        LOG_ERROR("Neither SIMD function nor scalar funtion has been provided. "
+                  "Please check input function.");
+      }
+    }
+#endif
+  }
+  while (i < result->data_size) {
+    if (require_broadcast) {
+    } else {
+      a_offset = i;
+    }
+    if (scalar_binary_operation) {
+      result->data[i] = (zfl)scalar_binary_operation(
+          other->scalar_is_first ? other->scalar : a->data[a_offset],
+          other->scalar_is_first ? a->data[a_offset] : other->scalar);
+    }
+    i++;
+  }
+  return result;
+}
+
 static zfl scalar_add(zfl a, zfl b) { return a + b; }
 void *zor_add(void *a, void *b) {
   return zor_pairwise(a, b, scalar_add, SIMD_add);
@@ -850,7 +952,6 @@ void *zor_divide(void *a, void *b) {
   return zor_pairwise(a, b, scalar_divide, SIMD_divide);
 }
 
-#define ZOR_REDUCE_AXIS_NONE ((uint8_t)-1)
 static void perform_global_reduction(
     zor *restrict tensor, zor *restrict reduce,
     zfl (*scalar_binary_operation)(zfl a, zfl b),
@@ -1323,10 +1424,10 @@ void *zor_negative(void *restrict self) {
 
   uint64_t i = 0;
 #if SIMD_STRIDE > 1
-  auto neg = DUP_N_SIMD(-1.);
+  // auto neg = DUP_N_SIMD(-1.);
   for (i = 0; (i + SIMD_STRIDE) < tensor->data_size; i += SIMD_STRIDE) {
     auto vec = LOAD_SIMD(tensor->data + i);
-    auto neg_vec = SIMD_multiply(neg, vec);
+    auto neg_vec = SIMD_additive_inverse(vec);
     STORE_SIMD(result->data + i, neg_vec);
   }
 #endif
@@ -1334,4 +1435,133 @@ void *zor_negative(void *restrict self) {
     result->data[i] = -tensor->data[i];
   }
   return result;
+}
+
+void *zor_relu(void *restrict self) {
+  zor *restrict tensor = self;
+
+  if (!tensor) {
+    LOG_ERROR("Input tensors cannot be NULL.");
+    return NULL;
+  }
+
+  volatile zor *result = zor_init(tensor->rank, tensor->shape);
+  if (!result) {
+    LOG_ERROR("Failed to initialize output tensor.");
+    return NULL;
+  }
+
+  uint64_t i = 0;
+#if SIMD_STRIDE > 1
+  auto zero = DUP_N_SIMD(0.);
+  for (i = 0; (i + SIMD_STRIDE) < tensor->data_size; i += SIMD_STRIDE) {
+    auto vec = LOAD_SIMD(tensor->data + i);
+    auto relu_vec = SIMD_max(zero, vec);
+
+    STORE_SIMD(result->data + i, relu_vec);
+  }
+#endif
+  for (; i < tensor->data_size; i++) {
+    result->data[i] = fmax((double)tensor->data[i], 0);
+  }
+  return result;
+}
+
+uint64_t zor_to_string(void *tensor, char *buffer, uint64_t buffer_limit) {
+
+  const zor *self = tensor;
+
+  uint64_t col = self->shape[self->rank - 1];
+  const zfl *const data = self->data;
+  uint64_t data_length = self->data_size;
+  uint64_t length = data_length <= 100 ? data_length : 100;
+  uint64_t rear = 0, back = 0;
+
+  // Use a temporary buffer to avoid overwriting the main buffer
+  char tmp_buf[64];
+
+  // First pass to determine rear and back with fixed decimal format
+  for (uint64_t i = 0; i < length; i++) {
+    int written = snprintf(tmp_buf, sizeof(tmp_buf), "%.15f", data[i]);
+    if (written < 0) {
+      return 0;
+    }
+
+    char *integer_part = tmp_buf;
+    char *dot = strchr(tmp_buf, '.');
+    uint64_t rtmp, btmp = 0;
+
+    if (dot) {
+      *dot = '\0';
+      // Trim trailing zeros from the decimal part
+      char *decimal_part = dot + 1;
+      size_t decimal_len = strlen(decimal_part);
+      while (decimal_len > 0 && decimal_part[decimal_len - 1] == '0') {
+        decimal_len--;
+      }
+      btmp = decimal_len;
+    }
+
+    rtmp = strlen(integer_part);
+    rear = rear > rtmp ? rear : rtmp;
+    back = back > btmp ? back : btmp;
+  }
+
+  // Prepare the format string
+  char fmt[255];
+  snprintf(fmt, sizeof(fmt), "%%%u.%uf  ", (uint32_t)(rear + 1),
+           (uint32_t)back);
+
+  uint64_t i = 0, string_length = 0;
+  while (i < length) {
+    // Check remaining space to avoid overflow
+    uint64_t remaining_space = buffer_limit - string_length;
+    if (remaining_space <
+        (rear + back + 2)) { // Estimated space for one element and newline
+      break;
+    }
+
+    // Format the current number
+    int written =
+        snprintf(buffer + string_length, remaining_space, fmt, data[i]);
+    if (written < 0) {
+      break;
+    }
+    string_length += written;
+
+    // Add newline at the end of each row
+    if ((i % col) == (col - 1)) {
+      if (string_length < buffer_limit) {
+        buffer[string_length] = '\n';
+        string_length++;
+        buffer[string_length] = '\0';
+      } else {
+        break;
+      }
+    }
+
+    i++;
+  }
+
+  // Add truncation indicator if necessary
+  if (data_length > i) {
+    // Ensure at least 4 bytes available for "...\0"
+    uint64_t available = buffer_limit - string_length;
+    if (available >= 4) {
+      strcpy(buffer + string_length, "...");
+      string_length += 3;
+    } else if (available > 0) {
+      strncpy(buffer + buffer_limit - 4, "...", available);
+      string_length = buffer_limit - 1;
+      buffer[string_length] = '\0';
+    }
+
+    // Remove trailing newline if present
+    if (string_length > 0 && buffer[string_length - 1] == '\n') {
+      string_length--;
+      buffer[string_length] = '\0';
+    }
+  }
+
+  return string_length;
 }

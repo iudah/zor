@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(Zor VERSION 1.0 DESCRIPTION "zor tensor library")
+project(Zor VERSION 2.1 DESCRIPTION "zor tensor library")
 
 set(TARGET zor)
 
