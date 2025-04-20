@@ -5,17 +5,19 @@
 #include <string.h>
 #define __STDC_WANT_IEC_60559_FUNC_EXT__ 1
 #define __STDC_WANT_IEC_60559_DFB_EXT__ 1
-#include "../include/zor.h"
-#include "../include/zor_simd_defines.h"
 #include <entropy.h>
 #include <float.h>
 #include <pcg_variants.h>
 #include <zot.h>
 
+#include "../include/zor.h"
+#include "../include/zor_simd_defines.h"
+
 typedef struct zor {
   zfl *data;
   uint32_t *shape;
   uint32_t *strides;
+  void *extra_payload;
   uint64_t data_size;
   uint8_t rank;
 } zor;
@@ -71,6 +73,8 @@ void *zor_init(uint8_t rank, uint32_t *restrict shape) {
 }
 
 uint8_t zor_rank(void *restrict tensor) { return ((zor *)tensor)->rank; }
+
+uint64_t zor_size(void *restrict tensor) { return ((zor *)tensor)->data_size; }
 
 uint32_t *zor_shape(void *restrict self, uint32_t *shape) {
   if (shape) {
@@ -199,7 +203,6 @@ void *zor_random(uint8_t rank, uint32_t *restrict shape, float min, float max) {
 }
 
 void *zor_from_array(uint8_t rank, uint32_t *shape, float *numbers) {
-
   zor *tensor = zor_init(rank, shape);
   if (tensor == NULL) {
     return NULL;
@@ -433,10 +436,10 @@ void *zor_slice(void *self, uint32_t n_slice_triples,
   return slice;
 }
 
-__attribute__((
-    warn_unused_result("Ensure to check return value of function"))) bool
-zor_get_element(void *restrict self, const int *restrict indices,
-                float *restrict value) {
+// __attribute__((
+//     warn_unused_result("Ensure to check return value of function")))
+bool zor_get_element(void *restrict self, const int *restrict indices,
+                     float *restrict value) {
   zor *restrict tensor = self;
 
   if (tensor == NULL) {
@@ -482,6 +485,10 @@ bool zor_set_element(void *restrict self, const int *restrict indices,
   return true;
 }
 
+#if defined __arm__ && defined __ARM_FP && !defined __LITTLE_ENDIAN__
+#error Sorry but I am trying to finish this project and currently only support little endian arm because that is what I use.
+#endif
+
 // Core math functionalities and utilities
 #if defined(use_bfp16) || defined(use_float16)
 #include <arm_neon.h>
@@ -525,6 +532,7 @@ bool zor_set_element(void *restrict self, const int *restrict indices,
 #define SIMD_additive_inverse vnegq_f32
 
 #else
+#define SIMD_type zfl
 #define SIMD_STRIDE 1
 #endif
 
@@ -540,6 +548,7 @@ bool zor_set_element(void *restrict self, const int *restrict indices,
 #define SIMD_get_lane vget_lane_f32
 
 #define SIMD_divide vdivq_f32
+#define SIMD_multiply_by_scalar vmulq_n_f32
 #define SIMD_multiply vmulq_f32
 
 #define SIMD_add_x2 vadd_f32
@@ -556,13 +565,15 @@ bool zor_set_element(void *restrict self, const int *restrict indices,
 #define SIMD_pmax_x2 vpmax_f32
 #define SIMD_reduce_max vmaxvq_f32
 
+#define SIMD_float_to_int_with_shift vcvtq_n_s32_f32
+#define SIMD_float_to_int vcvtq_s32_f32
 #endif
 
+#ifndef use_float32
 #define __ai static __inline__ __attribute__((__always_inline__, __nodebug__))
 
 __ai __attribute__((target("neon"))) SIMD_type SIMD_divide(SIMD_type dividend,
                                                            SIMD_type divisor) {
-
   /*determine an initial estimate of reciprocal of divisor.*/
   auto initial_reciprocal = SIMD_initial_reciprocal(divisor);
   auto correction_factor = SIMD_correction_factor(divisor, initial_reciprocal);
@@ -572,12 +583,15 @@ __ai __attribute__((target("neon"))) SIMD_type SIMD_divide(SIMD_type dividend,
 
   return SIMD_multiply(dividend, initial_reciprocal);
 }
+#endif
 
 #if defined(use_float16)
 #define float_type zfl
 #else
 #define float_type float
 #endif
+
+#ifndef use_float32
 
 __ai __attribute__((target("neon"))) float_type SIMD_sum(SIMD_type a) {
   auto sum = SIMD_add_x2(SIMD_get_high(a), SIMD_get_high(a));
@@ -597,6 +611,66 @@ __ai __attribute__((target("neon"))) float_type SIMD_reduce_max(SIMD_type a) {
   max = SIMD_pmin_x2(max, max);
   return SIMD_get_lane(max, 0);
 }
+
+__ai __attribute__((target("neon"))) SIMD_type SIMD_round(SIMD_type a) {
+  // https://stackoverflow.com/a/69770515
+  auto a_as_int = SIMD_float_to_int_with_shift(a, 1);
+  auto arithmetic_shift_right =
+      vsraq_n_s32(a_as_int, a_as_int, 31); // account for negative rounding
+  auto floor_round = vrshrq_n_s32(arithmetic_shift_right, 1);
+  return vcvtq_f32_s32(floor_round);
+}
+
+#define LN2_MUL_INV                                                            \
+  1.442695040888963407359924681001892137426645954152985934135449406931109219181185079885526622893506344f
+#define LN2                                                                    \
+  0.6931471805599453094172321214581765680755001343602552541206800094933936219696947156058633269964186875f
+
+__ai __attribute__((target("neon"))) SIMD_type SIMD_exp(SIMD_type a) {
+  auto a_over_ln2 = SIMD_multiply_by_scalar(a, LN2_MUL_INV);
+
+  auto n = SIMD_round(a_over_ln2);
+
+  auto r = SIMD_subtract(a, SIMD_multiply_by_scalar(n, LN2));
+  auto r2 = SIMD_multiply(r, r);
+  auto r3 = SIMD_multiply(r2, r);
+  auto r4 = SIMD_multiply(r3, r);
+  auto r5 = SIMD_multiply(r4, r);
+  auto r6 = SIMD_multiply(r5, r);
+
+  auto exp_r_poly = SIMD_add(
+      DUP_N_SIMD(1.f),
+      SIMD_add(
+          r,
+          SIMD_add(
+              SIMD_multiply_by_scalar(r2, 0.5f),
+              SIMD_add(
+                  SIMD_multiply_by_scalar(
+                      r3, 0.16666666666666666666666666666666666666666666667f),
+                  SIMD_add(
+                      SIMD_multiply_by_scalar(
+                          r4, 0.0416666666666666666666666666666666666667f),
+                      SIMD_add(
+                          SIMD_multiply_by_scalar(
+                              r5,
+                              0.0083333333333333333333333333333333333333333333333333333333f),
+                          SIMD_multiply_by_scalar(
+                              r6,
+                              0.001388888888888888888888888888888888888888888889f)))))));
+
+  // Convert n (float) to integer for bit-level manipulation
+  auto n_int = SIMD_float_to_int(n);
+
+  // Compute 2^n by constructing the floating-point exponent:
+  // In IEEE 754 single precision, the exponent bias is 127.
+  int32x4_t exp_int = vshlq_n_s32(vaddq_s32(n_int, vdupq_n_s32(127)), 23);
+  float32x4_t pow2n = vreinterpretq_f32_s32(exp_int);
+
+  // exp(x) ≈ 2^n * poly(r)
+  return vmulq_f32(pow2n, exp_r_poly);
+}
+
+#endif
 
 #if defined(use_bfp16)
 #undef SIMD_divide
@@ -682,6 +756,80 @@ __ai __attribute__((target("neon"))) zfl SIMD_reduce_min(SIMD_type a) {
 }
 
 #endif
+__ai __attribute__((target("neon"))) SIMD_type SIMD_log(SIMD_type a) {
+
+  // Reinterpret input to extract bits
+  uint32x4_t x_bits = vreinterpretq_u32_f32(a);
+
+  // Extract exponent and compute k
+  uint32x4_t exponent_bits = vshrq_n_u32(x_bits, 23);
+  exponent_bits = vandq_u32(exponent_bits, vdupq_n_u32(0xFF));
+  int32x4_t k_i =
+      vsubq_s32(vreinterpretq_s32_u32(exponent_bits), vdupq_n_s32(127));
+  float32x4_t k = vcvtq_f32_s32(k_i);
+
+  // Reconstruct mantissa m in [1, 2)
+  uint32x4_t m_bits = vandq_u32(x_bits, vdupq_n_u32(0x007FFFFF));
+  m_bits = vorrq_u32(m_bits, vdupq_n_u32(0x3F800000));
+  float32x4_t m = vreinterpretq_f32_u32(m_bits);
+
+  // Compute f = m - 1.0f and z = f / (m + 1.0f)
+  float32x4_t f = vsubq_f32(m, vdupq_n_f32(1.0f));
+  float32x4_t denominator = vaddq_f32(m, vdupq_n_f32(1.0f));
+
+  // Compute reciprocal of denominator using Newton-Raphson
+  float32x4_t z = SIMD_divide(f, denominator);
+
+  // Compute polynomial approximation
+  float32x4_t w = vmulq_f32(z, z);
+  const float32x4_t R0 = vdupq_n_f32(7.0376836292E-2f);
+  const float32x4_t R1 = vdupq_n_f32(-1.1514610310E-1f);
+  const float32x4_t R2 = vdupq_n_f32(1.1676998740E-1f);
+  const float32x4_t R3 = vdupq_n_f32(-1.2420140846E-1f);
+
+  float32x4_t poly = vmlaq_f32(R2, w, R3);
+  poly = vmlaq_f32(R1, w, poly);
+  poly = vmlaq_f32(R0, w, poly);
+
+  float32x4_t R = vmlaq_f32(z, vmulq_f32(z, w), poly);
+  float32x4_t log_m = vaddq_f32(R, R); // 2 * R
+
+  // Combine with exponent contribution
+  const float32x4_t ln2 = vdupq_n_f32(0.69314718056f);
+  float32x4_t result = vmlaq_f32(log_m, k, ln2);
+
+  return result;
+}
+#endif
+
+#ifdef use_float32
+#define SIMD_initial_reciprocal NULL
+#define SIMD_correction_factor NULL
+#define SIMD_get_high NULL
+#define SIMD_get_low NULL
+#define SIMD_get_lane NULL
+
+#define SIMD_add NULL
+#define SIMD_subtract NULL
+#define SIMD_additive_inverse NULL
+
+#define SIMD_divide NULL
+#define SIMD_multiply NULL
+
+#define SIMD_add_x2 NULL
+#define SIMD_padd_x2 NULL
+#define SIMD_sum NULL
+
+#define SIMD_min NULL
+#define SIMD_min_x2 NULL
+#define SIMD_pmin_x2 NULL
+#define SIMD_reduce_min NULL
+
+#define SIMD_max NULL
+#define SIMD_max_x2 NULL
+#define SIMD_pmax_x2 NULL
+#define SIMD_reduce_max NULL
+
 #endif
 
 #define maxi(a, b) ((a) > (b) ? a : b)
@@ -806,7 +954,7 @@ void *zor_pairwise(void *self, void *other,
       b_data = b->data + i;
       a_offset = b_offset = i;
     }
-#if SIMD_STRIDE > 1
+#if !defined use_float32 && SIMD_STRIDE > 1
     if (simd_binary_operation) {
       auto a_simd_vector = LOAD_SIMD(((a_data)));
       auto b_simd_vector = LOAD_SIMD(((b_data)));
@@ -885,7 +1033,9 @@ void *zor_unary_pairwise(void *self, struct unary_pairwise_data *scalar_float,
   uint32_t a_offset = 0;
   const auto a_rank_difference = result->rank - a->rank;
 
+#if !defined use_float32 && SIMD_STRIDE > 1
   auto other_simd_vector = DUP_N_SIMD(((other->scalar)));
+#endif
   uint64_t i = 0;
   for (; (i + SIMD_STRIDE) <= result->data_size; i += SIMD_STRIDE) {
     if (require_broadcast) {
@@ -957,7 +1107,6 @@ static void perform_global_reduction(
     zfl (*scalar_binary_operation)(zfl a, zfl b),
     SIMD_type (*simd_binary_operation)(SIMD_type a, SIMD_type b),
     zfl (*simd_reduction_operation)(SIMD_type a)) {
-
   uint64_t i = 0;
 #if SIMD_STRIDE > 1
   if (simd_binary_operation && tensor->data_size >= SIMD_STRIDE) {
@@ -965,7 +1114,6 @@ static void perform_global_reduction(
     typeof(reduction_vector) next_vector;
     for (i = SIMD_STRIDE; (i + SIMD_STRIDE) <= tensor->data_size;
          i += SIMD_STRIDE) {
-
       next_vector = LOAD_SIMD((tensor->data + i));
       reduction_vector = simd_binary_operation(reduction_vector, next_vector);
     }
@@ -996,7 +1144,6 @@ static void perform_axis_reduction(
     zor *restrict tensor, zor *restrict reduce, uint8_t axis,
     zfl (*scalar_binary_operation)(zfl a, zfl b),
     SIMD_type (*simd_binary_operation)(SIMD_type a, SIMD_type b)) {
-
   auto axis_stride = tensor->strides[axis];
   auto reduced_size = reduce->data_size;
   for (auto i = 0; i < reduced_size;) {
@@ -1099,7 +1246,6 @@ void *zor_reduce(void *restrict self, int32_t reduce_axis, int32_t *axis_ptr,
     perform_axis_reduction(pre_reduce_transpose, result, 0,
                            scalar_binary_operation, simd_binary_operation);
     if (reduce_axis) {
-
       zor_free(pre_reduce_transpose);
     }
   }
@@ -1114,15 +1260,14 @@ void *zor_mean(void *restrict self, int axis) {
   zor *tensor = self;
   zor *mean = zor_reduce(tensor, axis, &axis, scalar_add, SIMD_add, SIMD_sum);
   if (mean) {
-
     zfl divisor = (zfl)(axis != ZOR_REDUCE_AXIS_NONE ? tensor->shape[axis]
                                                      : tensor->data_size);
 
+    auto i = 0;
     if (mean->data_size >= SIMD_STRIDE) {
 #if SIMD_STRIDE > 1
       auto divisor_vector = DUP_N_SIMD(divisor);
 #endif
-      auto i = 0;
 #if SIMD_STRIDE > 1
       for (; (i - SIMD_STRIDE) <= mean->data_size; i += SIMD_STRIDE) {
         auto dividend_vector = LOAD_SIMD(((mean->data + i)));
@@ -1131,10 +1276,9 @@ void *zor_mean(void *restrict self, int axis) {
         STORE_SIMD((mean->data + i), simd_result);
       }
 #endif
-
-      for (; i < mean->data_size; i++) {
-        mean->data[i] /= divisor;
-      }
+    }
+    for (; i < mean->data_size; i++) {
+      mean->data[i] /= divisor;
     }
   }
 
@@ -1244,7 +1388,8 @@ void *zor_tensordot(void *self, void *other, int32_t n_axes, int32_t *a_axes,
 
   bool a_axes_used[a->rank];
   bool b_axes_used[b->rank];
-  auto i = a->rank, j = b->rank;
+  auto i = a->rank;
+  auto j = b->rank;
   while (i || j) {
     if (i)
       a_axes_used[--i] = false;
@@ -1304,7 +1449,9 @@ void *zor_tensordot(void *self, void *other, int32_t n_axes, int32_t *a_axes,
   }
 
   i = j = 0;
-  auto m = 0, n = n_b_untouched_axes, k = n_a_untouched_axes;
+  auto m = 0;
+  auto n = n_b_untouched_axes;
+  auto k = n_a_untouched_axes;
   while (n < b->rank || (m < n_a_untouched_axes)) {
     if ((i < a->rank)) {
       if (!a_axes_used[i]) {
@@ -1437,6 +1584,63 @@ void *zor_negative(void *restrict self) {
   return result;
 }
 
+void *zor_exp(void *restrict self) {
+  zor *restrict tensor = self;
+
+  if (!tensor) {
+    LOG_ERROR("Input tensors cannot be NULL.");
+    return NULL;
+  }
+
+  zor *result = zor_init(tensor->rank, tensor->shape);
+  if (!result) {
+    LOG_ERROR("Failed to initialize output tensor.");
+    return NULL;
+  }
+
+  uint64_t i = 0;
+#if SIMD_STRIDE > 1
+  // auto neg = DUP_N_SIMD(-1.);
+  for (i = 0; (i + SIMD_STRIDE) < tensor->data_size; i += SIMD_STRIDE) {
+    auto vec = LOAD_SIMD(tensor->data + i);
+    auto exp_vec = SIMD_exp(vec);
+    STORE_SIMD(result->data + i, exp_vec);
+  }
+#endif
+  for (; i < tensor->data_size; i++) {
+    result->data[i] = (zfl)exp(tensor->data[i]);
+  }
+  return result;
+}
+void *zor_log(void *restrict self) {
+  zor *restrict tensor = self;
+
+  if (!tensor) {
+    LOG_ERROR("Input tensors cannot be NULL.");
+    return NULL;
+  }
+
+  zor *result = zor_init(tensor->rank, tensor->shape);
+  if (!result) {
+    LOG_ERROR("Failed to initialize output tensor.");
+    return NULL;
+  }
+
+  uint64_t i = 0;
+#if SIMD_STRIDE > 1
+  // auto neg = DUP_N_SIMD(-1.);
+  for (i = 0; (i + SIMD_STRIDE) < tensor->data_size; i += SIMD_STRIDE) {
+    auto vec = LOAD_SIMD(tensor->data + i);
+    auto log_vec = SIMD_log(vec);
+    STORE_SIMD(result->data + i, log_vec);
+  }
+#endif
+  for (; i < tensor->data_size; i++) {
+    result->data[i] = (zfl)log(tensor->data[i]);
+  }
+  return result;
+}
+
 void *zor_relu(void *restrict self) {
   zor *restrict tensor = self;
 
@@ -1445,7 +1649,7 @@ void *zor_relu(void *restrict self) {
     return NULL;
   }
 
-  volatile zor *result = zor_init(tensor->rank, tensor->shape);
+  zor *result = zor_init(tensor->rank, tensor->shape);
   if (!result) {
     LOG_ERROR("Failed to initialize output tensor.");
     return NULL;
@@ -1468,7 +1672,6 @@ void *zor_relu(void *restrict self) {
 }
 
 uint64_t zor_to_string(void *tensor, char *buffer, uint64_t buffer_limit) {
-
   const zor *self = tensor;
 
   uint64_t col = self->shape[self->rank - 1];
@@ -1564,4 +1767,189 @@ uint64_t zor_to_string(void *tensor, char *buffer, uint64_t buffer_limit) {
   }
 
   return string_length;
+}
+
+void *zor_sigmoid(void *restrict self) {
+  zor *restrict tensor = self;
+
+  if (!tensor) {
+    LOG_ERROR("Input tensors cannot be NULL.");
+    return NULL;
+  }
+
+  zor *result = zor_init(tensor->rank, tensor->shape);
+  if (!result) {
+    LOG_ERROR("Failed to initialize output tensor.");
+    return NULL;
+  }
+
+  uint64_t i = 0;
+#if SIMD_STRIDE > 1
+  auto ones = DUP_N_SIMD(1.);
+  for (i = 0; (i + SIMD_STRIDE) < tensor->data_size; i += SIMD_STRIDE) {
+    auto vec = LOAD_SIMD(tensor->data + i);
+    auto neg_vec = SIMD_additive_inverse(vec);
+    auto exp_vec = SIMD_exp(neg_vec);
+    auto one_plus_exp = SIMD_add(ones, exp_vec);
+    auto sigmoid_vec = SIMD_divide(ones, one_plus_exp);
+
+    STORE_SIMD(result->data + i, sigmoid_vec);
+  }
+#endif
+  for (; i < tensor->data_size; i++) {
+    result->data[i] = 1 / (1 + exp(-(double)tensor->data[i]));
+  }
+  return result;
+}
+
+void *zor_embed(void *table, void *toks) {
+  zor *embed_table = table;
+  zor *idxs = toks;
+
+  if (embed_table->rank > 2) {
+    LOG_ERROR("Expected an embedding table with 2 dimensions got %" PRId32 ".",
+              (int)embed_table->rank);
+    abort();
+  }
+
+  auto channel = embed_table->shape[1];
+  auto n_embed = embed_table->shape[0];
+
+  uint32_t shape[idxs->rank + 1];
+  memcpy(shape, idxs->shape, sizeof(shape));
+  shape[idxs->rank] = channel;
+
+  zor *embed = zor_init(idxs->rank + 1, shape);
+
+  for (int i = 0; i < idxs->data_size; i++) {
+    auto idxf = idxs->data[i];
+    if (idxf < 0) {
+      idxf += n_embed;
+    }
+    if (idxf > n_embed) {
+    }
+
+    uint64_t idx = idxf;
+
+    memcpy(embed->data + i * channel, embed_table->data + idx * channel,
+           sizeof(*embed_table->data) * channel);
+  }
+
+  return embed;
+}
+
+void *zor_softmax(void *restrict tensor, int axis) {
+  void *max = zor_max(tensor, axis);
+  void *clipped_x = zor_subtract(tensor, max);
+
+  void *exp_x = zor_exp(clipped_x);
+
+  void *result = zor_divide(exp_x, zor_sum(exp_x, axis));
+
+  return result;
+}
+
+void *zor_softmax_backward(void *restrict upstream_grad, void *restrict softmax,
+                           int axis) {
+  // element‑wise G * S
+  void *gs = zor_multiply(upstream_grad, softmax);
+  // sum over softmax axis: ⟨G, S⟩
+  void *scale = zor_sum(gs, axis);
+  // broadcast and subtract: G - ⟨G, S⟩
+  void *adj = zor_subtract(upstream_grad, scale);
+  // final grad: S * (G - ⟨G, S⟩)
+  void *dX = zor_multiply(softmax, adj);
+  return dX;
+}
+
+void *zor_log_softmax(void *restrict tensor, int axis) {
+  void *max = zor_max(tensor, axis);
+  void *clipped_x = zor_subtract(tensor, max);
+
+  void *exp_x = zor_exp(clipped_x);
+  void *softmax = zor_sum(exp_x, axis);
+  void *log_sum_exp = zor_add(max, zor_log(softmax));
+
+  void *result = zor_subtract(tensor, log_sum_exp);
+
+  zor *z = result;
+  z->extra_payload = softmax;
+
+  return result;
+}
+
+// def log_softmax_backward(g, x, axis):
+//     p = torch.softmax(x, dim=axis)
+//     sum_g = g.sum(dim=axis, keepdim=True)
+//     return g - sum_g * p
+
+void *zor_log_softmax_backward(void *upstream_grad, void *log_softmax,
+                               int axis) {
+  void *probs = ((zor *)log_softmax)->extra_payload;
+  // sum over softmax axis: ⟨G⟩
+  void *sum_g = zor_sum(upstream_grad, axis);
+  // final grad: (G - ⟨G⟩* S)
+  return zor_subtract(upstream_grad, zor_multiply(sum_g, probs));
+}
+
+void *zor_negative_log_likelihood_loss(void *restrict pred,
+                                       void *restrict distr, int axis) {
+
+  void *log_pred = zor_log(pred);
+  void *xlog_x_hat = zor_multiply(distr, log_pred);
+  void *sum = zor_sum(xlog_x_hat, axis);
+  zor *result = zor_negative(sum);
+  void **input = result->extra_payload = zmalloc(3 * sizeof(void *));
+  input[0] = pred;
+  input[1] = distr;
+  input[2] = log_pred;
+
+  return result;
+}
+
+void *
+zor_negative_log_likelihood_loss_backward_pred(void *restrict upstream_grad,
+                                               void *restrict nlll, int axis) {
+
+  void **input = ((zor *)nlll)->extra_payload;
+
+  void *pred = input[0];
+  void *distr = input[1];
+
+  return zor_multiply(upstream_grad, zor_negative(zor_divide(distr, pred)));
+}
+
+void *
+zor_negative_log_likelihood_loss_backward_distr(void *restrict upstream_grad,
+                                                void *restrict nlll, int axis) {
+
+  void **input = ((zor *)nlll)->extra_payload;
+
+  return zor_multiply(upstream_grad, zor_negative(input[2]));
+}
+
+void *zor_cross_entropy_loss(void *restrict pred, void *restrict distr,
+                             int axis) {
+
+  return zor_negative_log_likelihood_loss(zor_log_softmax(pred, axis), distr,
+                                          axis);
+}
+
+void *zor_cross_entropy_backward_pred(void *restrict upstream_grad,
+                                      void *restrict x_entropy, int axis) {
+
+  void **input = ((zor *)x_entropy)->extra_payload;
+
+  void *pred = input[0];
+  void *distr = input[1];
+
+  return zor_multiply(upstream_grad, zor_subtract(pred, distr));
+}
+
+void *zor_cross_entropy_backward_distr(void *restrict upstream_grad,
+                                       void *restrict x_entropy, int axis) {
+
+  void **input = ((zor *)x_entropy)->extra_payload;
+
+  return zor_multiply(upstream_grad, zor_negative(input[2]));
 }

@@ -1,9 +1,8 @@
 #ifndef _ZOR_SIMD_DEFINES_H_
 #define _ZOR_SIMD_DEFINES_H_
 
-
 #if defined(__ARM_NEON__) || defined(__AVX__) || defined(__SSE__)
-#if  defined(__ARM_NEON__) && defined(__ARM_FP) && (__ARM_FP & 2)
+#if defined(__ARM_NEON__) && defined(__ARM_FP) && (__ARM_FP & 2)
 #define use_float16
 #elif defined(__ARM_NEON__) && defined(__ARM_FP) && defined(__ARM_FEATURE_BF16)
 #define use_bfp16
@@ -28,8 +27,4 @@ typedef _Float16 zfl;
 typedef float zfl;
 #endif
 
-
-
-
-
-#endif // _ZOR_SIMD_DEFINES_H_
+#endif  // _ZOR_SIMD_DEFINES_H_

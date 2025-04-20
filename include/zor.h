@@ -37,13 +37,19 @@ void *zor_transpose(void *restrict tensor, int32_t *restrict axes);
 void *zor_slice(void *tensor, uint32_t n_slice_triples,
                 int32_t **restrict slice_triples);
 
-__attribute__((
-    warn_unused_result("Ensure to check return value of function"))) bool
+__attribute__((warn_unused_result(
+#ifdef __clang__
+    "Ensure to check return value of function"
+#endif
+    ))) bool
 zor_get_element(void *restrict tensor, const int *restrict indices,
                 float *restrict value);
 
-__attribute__((
-    warn_unused_result("Ensure to check return value of function"))) bool
+__attribute__((warn_unused_result(
+#ifdef __clang__
+    "Ensure to check return value of function"
+#endif
+    ))) bool
 zor_set_element(void *restrict tensor, const int *restrict indices,
                 float value);
 
@@ -76,5 +82,41 @@ void *zor_negative(void *restrict tensor);
 void *zor_relu(void *restrict tensor);
 
 uint64_t zor_to_string(void *tensor, char *buffer, uint64_t buffer_limit);
+
+void *zor_sigmoid(void *restrict tensor);
+
+uint64_t zor_size(void *restrict tensor);
+
+void *zor_embed(void *table, void *toks);
+
+void *zor_softmax(void *restrict tensor, int axis);
+
+void *zor_softmax_backward(void *restrict upstream_grad, void *restrict softmax,
+                           int axis);
+
+void *zor_log_softmax(void *restrict tensor, int axis);
+
+void *zor_log_softmax_backward(void *upstream_grad, void *log_softmax,
+                               int axis);
+
+void *zor_negative_log_likelihood_loss(void *restrict pred,
+                                       void *restrict distr, int axis);
+
+void *
+zor_negative_log_likelihood_loss_backward_pred(void *restrict upstream_grad,
+                                               void *restrict nlll, int axis);
+
+void *
+zor_negative_log_likelihood_loss_backward_distr(void *restrict upstream_grad,
+                                                void *restrict nlll, int axis);
+
+void *zor_cross_entropy_loss(void *restrict pred, void *restrict distr,
+                             int axis);
+
+void *zor_cross_entropy_backward_pred(void *restrict upstream_grad,
+                                      void *restrict x_entropy, int axis);
+
+void *zor_cross_entropy_backward_distr(void *restrict upstream_grad,
+                                       void *restrict x_entropy, int axis);
 
 #endif
